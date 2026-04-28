@@ -181,6 +181,17 @@ const CUSTOM_INPUT_SCHEMA = {
   required: ['logText']
 };
 
+const EVALUATION_SCHEMA = {
+  type: 'object',
+  properties: {
+    dramaScore: { type: 'integer', description: '戏剧性评分 (0-100)' },
+    achievementScore: { type: 'integer', description: '成就度评分 (0-100)' },
+    meaningScore: { type: 'integer', description: '意义感评分 (0-100)' },
+    epicCommentary: { type: 'string', description: '具有史诗感的人生总结点评（80-150字）' }
+  },
+  required: ['dramaScore', 'achievementScore', 'meaningScore', 'epicCommentary']
+};
+
 export async function processCustomInput(
   config: LLMConfig,
   input: string,
@@ -244,3 +255,70 @@ export async function processCustomInput(
     return { text: '行动...', logText: '你的行动产生了一些难以言说的后果。' };
   }
 }
+
+export async function evaluateLife(
+  config: LLMConfig,
+  world: World,
+  age: number,
+  gender: string,
+  stats: GameStats,
+  history: string[],
+  deathReason: string
+) {
+  const prompt = `玩家在${world.name}（${world.desc}）中结束了短暂而可贵的一生。
+玩家结束时的年龄：${age}岁，性别：${gender === 'male' ? '男' : gender === 'female' ? '女' : '未知'}。
+最终属性：健康${stats.health}, 智力${stats.int}, 颜值${stats.cha}, 家境${stats.wealth}, 运气${stats.luck}, 体质${stats.str}
+
+主要生平记录：
+${history.join('\n')}
+
+死亡原因/结局：${deathReason}
+
+请你作为命运的记录者，对这段人生进行结语，并从戏剧性、成就度和意义感三个维度进行0-100的打分。点评必须要有一种史诗感、沧桑感或宿命感。
+
+必须返回符合如下结构的JSON：
+` + JSON.stringify(EVALUATION_SCHEMA, null, 2);
+
+  try {
+    const { genAIClient, openaiClient } = getClient(config);
+    let jsonStr = '';
+
+    if (config.provider === 'gemini' && genAIClient) {
+      const response = await genAIClient.models.generateContent({
+        model: config.model || 'gemini-3-flash-preview',
+        contents: prompt,
+        config: {
+          responseMimeType: 'application/json',
+        }
+      });
+      jsonStr = response.text || '';
+    } else if (openaiClient) {
+      const response = await openaiClient.chat.completions.create({
+        model: config.model || 'deepseek-chat',
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: 'json_object' }
+      });
+      jsonStr = response.choices[0].message.content || '';
+    }
+
+    jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '').trim();
+    if (!jsonStr) throw new Error('Empty response');
+
+    const parsed = JSON.parse(jsonStr);
+    return {
+      dramaScore: parsed.dramaScore || 0,
+      achievementScore: parsed.achievementScore || 0,
+      meaningScore: parsed.meaningScore || 0,
+      epicCommentary: parsed.epicCommentary || '命运的长河静静流淌，又有一颗星辰黯淡陨落。',
+    };
+  } catch (error) {
+    console.error('AI Evaluation failed:', error);
+    return {
+      dramaScore: 50,
+      achievementScore: 50,
+      meaningScore: 50,
+      epicCommentary: '凡人皆有一死，这大概这就是人生吧。',
+    };
+  }
+}
+

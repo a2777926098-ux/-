@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Heart, Brain, Sparkles, Coins, Star, Sword, Skull, RefreshCw, ChevronRight, Loader2, Users, Send, Save, Download, Trash2, User, UserPlus, Settings } from 'lucide-react';
+import { Heart, Brain, Sparkles, Coins, Star, Sword, Skull, RefreshCw, ChevronRight, Loader2, Users, Send, Save, Download, Trash2, User, UserPlus, Settings, LogOut } from 'lucide-react';
 import { GameStats, Talent, World, Choice, GameEvent, DynamicTalent, NPC, Gender, LogEntry, LLMConfig } from './game/types';
 import { WORLDS, INITIAL_TALENTS, DYNAMIC_TALENTS, getNextEvent } from './game/data';
-import { generateDynamicEvent, processCustomInput } from './game/gemini';
+import { generateDynamicEvent, processCustomInput, evaluateLife } from './game/gemini';
 
 const DEFAULT_LLM_CONFIG: LLMConfig = {
   provider: 'gemini',
@@ -12,9 +12,12 @@ const DEFAULT_LLM_CONFIG: LLMConfig = {
   model: 'gemini-3-flash-preview'
 };
 
-type Stage = 'MENU' | 'GENDER' | 'WORLD' | 'GACHA' | 'STATS' | 'LIFE' | 'DEATH' | 'SETTINGS';
+type Stage = 'MENU' | 'SAVES' | 'GENDER' | 'WORLD' | 'GACHA' | 'STATS' | 'LIFE' | 'DEATH' | 'SETTINGS';
 
 interface SaveData {
+  id: string;
+  name: string;
+  timestamp: number;
   world: World;
   talents: Talent[];
   stats: GameStats;
@@ -42,8 +45,9 @@ export default function App() {
   const [extraPoints, setExtraPoints] = useState(20);
   const [allocatedStats, setAllocatedStats] = useState<GameStats>({ health: 0, int: 0, cha: 0, wealth: 0, luck: 0, str: 0 });
   const [customAction, setCustomAction] = useState('');
-  const [hasSave, setHasSave] = useState(false);
+  const [saves, setSaves] = useState<SaveData[]>([]);
   const [llmConfig, setLlmConfig] = useState<LLMConfig>(DEFAULT_LLM_CONFIG);
+  const [evaluation, setEvaluation] = useState<{dramaScore: number, achievementScore: number, meaningScore: number, epicCommentary: string} | null>(null);
   const logEndRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll logs
@@ -52,8 +56,29 @@ export default function App() {
   }, [logs, currentEvent]);
 
   useEffect(() => {
-    const save = localStorage.getItem('sim_save');
-    if (save) setHasSave(true);
+    const savesStr = localStorage.getItem('sim_saves');
+    if (savesStr) {
+      try {
+        setSaves(JSON.parse(savesStr));
+      } catch (e) { }
+    } else {
+      // Migrate old single save if exists
+      const oldSave = localStorage.getItem('sim_save');
+      if (oldSave) {
+        try {
+          const parsed = JSON.parse(oldSave);
+          const legacySave: SaveData = {
+            ...parsed,
+            id: 'legacy_save',
+            name: `${parsed.age}岁 ${parsed.gender === 'male' ? '男' : parsed.gender === 'female' ? '女' : '未知'}在${parsed.world?.name || '未知世界'}`,
+            timestamp: Date.now()
+          };
+          setSaves([legacySave]);
+          localStorage.setItem('sim_saves', JSON.stringify([legacySave]));
+          localStorage.removeItem('sim_save');
+        } catch (e) { }
+      }
+    }
     
     const configSave = localStorage.getItem('sim_llm_config');
     if (configSave) {
@@ -63,22 +88,46 @@ export default function App() {
     }
   }, []);
 
+  useEffect(() => {
+    if (stage === 'DEATH' && world && !evaluation) {
+      const fetchEvaluation = async () => {
+        setIsGenerating(true);
+        const evalResult = await evaluateLife(
+          llmConfig,
+          world,
+          age,
+          gender,
+          stats,
+          logs.map(l => l.text),
+          deathReason
+        );
+        setEvaluation(evalResult);
+        setIsGenerating(false);
+      };
+      fetchEvaluation();
+    }
+  }, [stage]);
+
   const saveGame = () => {
     if (!world || stage !== 'LIFE') return;
-    const data: SaveData = {
+    const newSave: SaveData = {
+      id: `save_${Date.now()}`,
+      name: `${age}岁 ${gender === 'male' ? '男' : gender === 'female' ? '女' : '未知'}在${world.name}`,
+      timestamp: Date.now(),
       world, talents, stats, flags, npcs, age, logs, gender
     };
-    localStorage.setItem('sim_save', JSON.stringify(data));
-    setHasSave(true);
+    const newSaves = [newSave, ...saves];
+    setSaves(newSaves);
+    localStorage.setItem('sim_saves', JSON.stringify(newSaves));
+    
     // Add visual feedback directly in log
     setLogs(prev => [...prev, { age, text: '💾 游戏已存档。' }]);
   };
 
-  const loadGame = () => {
+  const loadGame = (saveId: string) => {
     try {
-      const saveStr = localStorage.getItem('sim_save');
-      if (!saveStr) return;
-      const data: SaveData = JSON.parse(saveStr);
+      const data = saves.find(s => s.id === saveId);
+      if (!data) return;
       setWorld(data.world);
       setTalents(data.talents);
       setStats(data.stats);
@@ -97,9 +146,10 @@ export default function App() {
     }
   };
 
-  const deleteSave = () => {
-    localStorage.removeItem('sim_save');
-    setHasSave(false);
+  const deleteSave = (saveId: string) => {
+    const newSaves = saves.filter(s => s.id !== saveId);
+    setSaves(newSaves);
+    localStorage.setItem('sim_saves', JSON.stringify(newSaves));
   };
 
   const fetchNextEvent = async (nextAge: number, currentWorld: World, newFlags: Record<string, number>, newStats: GameStats, currentTalents: Talent[], currentNpcs: NPC[], currentGender: string, newLogs: LogEntry[]) => {
@@ -364,28 +414,68 @@ export default function App() {
         >
           开启轮回 <ChevronRight size={18} />
         </button>
-        {hasSave && (
-          <div className="flex gap-2">
-            <button 
-              onClick={loadGame}
-              className="flex-1 px-8 py-3 bg-neutral-800 text-white rounded-full font-medium hover:bg-neutral-700 transition-colors flex items-center justify-center gap-2 border border-neutral-700"
-            >
-              <Download size={18} /> 继续游戏
-            </button>
-            <button 
-              onClick={deleteSave}
-              className="px-4 py-3 bg-neutral-800 text-neutral-400 rounded-full font-medium hover:text-red-400 hover:bg-neutral-700 transition-colors flex items-center justify-center border border-neutral-700"
-              title="删除存档"
-            >
-              <Trash2 size={18} />
-            </button>
-          </div>
+        {saves.length > 0 && (
+          <button 
+            onClick={() => setStage('SAVES')}
+            className="flex-1 px-8 py-3 bg-neutral-800 text-white rounded-full font-medium hover:bg-neutral-700 transition-colors flex items-center justify-center gap-2 border border-neutral-700"
+          >
+            <Download size={18} /> 读取存档
+          </button>
         )}
         <button 
           onClick={() => setStage('SETTINGS')}
           className="px-8 py-3 bg-neutral-900 text-neutral-400 rounded-full font-medium hover:text-white hover:bg-neutral-800 transition-colors flex items-center justify-center gap-2 border border-neutral-800"
         >
           <Settings size={18} /> 模型设置
+        </button>
+      </div>
+    </motion.div>
+  );
+
+  const renderSaves = () => (
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col h-full p-8 space-y-8">
+      <div className="text-center space-y-2">
+        <h2 className="text-3xl font-bold">存档记录</h2>
+        <p className="text-neutral-400">选择要继续的人生轨迹</p>
+      </div>
+      
+      <div className="flex-1 overflow-y-auto w-full max-w-2xl mx-auto space-y-4 pr-2">
+        {saves.map(save => (
+          <div key={save.id} className="flex flex-col sm:flex-row items-center gap-4 p-4 bg-neutral-900 border border-neutral-800 rounded-xl hover:border-neutral-600 transition-colors">
+            <div className="flex-1 w-full flex flex-col justify-center text-left">
+              <h3 className="font-bold text-lg text-white mb-1">{save.name}</h3>
+              <p className="text-sm text-neutral-500">{new Date(save.timestamp).toLocaleString()}</p>
+            </div>
+            <div className="flex items-center gap-3 w-full sm:w-auto">
+              <button 
+                onClick={() => loadGame(save.id)}
+                className="flex-1 sm:flex-none px-6 py-2 bg-white text-black rounded-lg font-medium hover:bg-neutral-200 transition-colors"
+              >
+                加载
+              </button>
+              <button 
+                onClick={() => deleteSave(save.id)}
+                className="p-2 bg-red-950/30 text-red-500 rounded-lg border border-red-900/50 hover:bg-red-900/50 hover:text-red-400 transition-colors"
+                title="删除存档"
+              >
+                <Trash2 size={20} />
+              </button>
+            </div>
+          </div>
+        ))}
+        {saves.length === 0 && (
+          <div className="text-center text-neutral-500 py-12">
+            暂无存档记录
+          </div>
+        )}
+      </div>
+      
+      <div className="flex justify-center shrink-0">
+        <button 
+          onClick={() => setStage('MENU')}
+          className="px-8 py-3 text-neutral-400 hover:text-white transition-colors border border-transparent hover:border-neutral-800 rounded-xl"
+        >
+          返回主菜单
         </button>
       </div>
     </motion.div>
@@ -646,13 +736,26 @@ export default function App() {
             <h2 className="text-2xl font-bold mb-1">{age} 岁 {gender === 'male' ? '♂' : gender === 'female' ? '♀' : ''}</h2>
             <p className="text-sm text-neutral-500">当前世界：{world?.name}</p>
           </div>
-          <button 
-            onClick={saveGame}
-            title="保存进度"
-            className="p-2 border border-neutral-700 bg-neutral-800 rounded-lg hover:bg-neutral-700 hover:text-white text-neutral-400 transition-colors"
-          >
-            <Save size={16} />
-          </button>
+          <div className="flex gap-2 shrink-0">
+            <button 
+              onClick={saveGame}
+              title="保存进度"
+              className="p-2 border border-neutral-700 bg-neutral-800 rounded-lg hover:bg-neutral-700 hover:text-white text-neutral-400 transition-colors"
+            >
+              <Save size={16} />
+            </button>
+            <button 
+              onClick={() => {
+                if(window.confirm('确定要返回主菜单吗？未保存的进度将会丢失。')) {
+                   setStage('MENU');
+                }
+              }}
+              title="返回主菜单"
+              className="p-2 border border-neutral-700 bg-neutral-800 rounded-lg hover:bg-red-900/50 hover:text-red-400 hover:border-red-900/50 text-neutral-400 transition-colors"
+            >
+              <LogOut size={16} />
+            </button>
+          </div>
         </div>
         
         <div>
@@ -790,25 +893,59 @@ export default function App() {
   );
 
   const renderDeath = () => (
-    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-center h-full space-y-8 p-12 text-center bg-black/50">
-      <Skull size={64} className="text-neutral-500 mb-4" />
-      <div className="space-y-4">
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center justify-start h-full p-8 md:p-12 text-center bg-black/50 overflow-y-auto">
+      <Skull size={64} className="text-neutral-500 mb-6 shrink-0 pt-8" />
+      <div className="space-y-4 mb-8">
         <h2 className="text-4xl font-bold bg-gradient-to-b from-white to-neutral-600 bg-clip-text text-transparent">人生落幕</h2>
         <p className="text-xl font-mono text-neutral-400">享年 {age} 岁</p>
         <p className="text-neutral-300 max-w-md mx-auto">{deathReason}</p>
       </div>
-      
-      <div className="w-full max-w-lg p-6 bg-neutral-900 border border-neutral-800 rounded-xl space-y-4 text-left shadow-2xl">
-        <h3 className="text-sm font-medium text-neutral-400 border-b border-neutral-800 pb-2">最终属性</h3>
-        {renderStats(stats)}
-      </div>
 
-      <button 
-        onClick={() => setStage('MENU')}
-        className="px-8 py-3 bg-white text-black rounded-full font-medium hover:bg-neutral-200 transition-colors mt-8"
-      >
-        再次轮回
-      </button>
+      {!evaluation ? (
+        <div className="flex flex-col items-center justify-center space-y-4 py-12">
+          <Loader2 size={32} className="animate-spin text-neutral-500" />
+          <p className="text-neutral-400 animate-pulse">命运正在结算你的一生...</p>
+        </div>
+      ) : (
+        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="w-full max-w-2xl space-y-8">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+            <div className="p-4 bg-neutral-900 border border-neutral-800 rounded-xl space-y-2">
+              <p className="text-neutral-400 text-sm">戏剧性</p>
+              <p className="text-3xl font-bold text-white">{evaluation.dramaScore}</p>
+            </div>
+            <div className="p-4 bg-neutral-900 border border-neutral-800 rounded-xl space-y-2">
+              <p className="text-neutral-400 text-sm">成就度</p>
+              <p className="text-3xl font-bold text-white">{evaluation.achievementScore}</p>
+            </div>
+            <div className="p-4 bg-neutral-900 border border-neutral-800 rounded-xl space-y-2">
+              <p className="text-neutral-400 text-sm">意义感</p>
+              <p className="text-3xl font-bold text-white">{evaluation.meaningScore}</p>
+            </div>
+          </div>
+          
+          <div className="p-6 bg-neutral-900/50 border border-neutral-800 rounded-xl italic text-lg text-neutral-300 leading-relaxed mx-auto shadow-inner relative text-left">
+             <div className="absolute top-0 left-0 w-1 h-full bg-neutral-700 rounded-l-xl"></div>
+            “{evaluation.epicCommentary}”
+          </div>
+          
+          <div className="w-full p-6 bg-neutral-900 border border-neutral-800 rounded-xl space-y-4 text-left shadow-2xl">
+            <h3 className="text-sm font-medium text-neutral-400 border-b border-neutral-800 pb-2">最终属性</h3>
+            {renderStats(stats)}
+          </div>
+
+          <div className="pt-4 pb-12 w-full flex justify-center">
+            <button 
+              onClick={() => {
+                setEvaluation(null);
+                setStage('MENU');
+              }}
+              className="px-12 py-4 bg-white text-black rounded-full font-bold hover:bg-neutral-200 transition-colors shadow-xl"
+            >
+              再次轮回
+            </button>
+          </div>
+        </motion.div>
+      )}
     </motion.div>
   );
 
@@ -819,8 +956,23 @@ export default function App() {
         {/* Decorative Grid Background */}
         <div className="absolute inset-0 bg-gradient-to-br from-neutral-900/50 to-neutral-950/50 opacity-20 pointer-events-none" />
         
-        <div className="relative h-full flex-1 w-full z-10">
+        <div className="relative h-full flex-1 w-full z-10 flex flex-col">
+          {['GENDER', 'WORLD', 'GACHA', 'STATS'].includes(stage) && (
+            <div className="absolute top-4 left-4 z-50">
+              <button
+                onClick={() => {
+                  if(window.confirm('确定要返回主界面吗？当前的设置将会丢失。')) {
+                    setStage('MENU');
+                  }
+                }}
+                className="px-3 py-2 border border-neutral-800 bg-neutral-900 rounded-lg hover:bg-neutral-800 hover:text-white text-neutral-400 transition-colors flex items-center gap-2 text-sm shadow-lg"
+              >
+                <LogOut size={14} /> 返回主界面
+              </button>
+            </div>
+          )}
           {stage === 'MENU' && renderMenu()}
+          {stage === 'SAVES' && renderSaves()}
           {stage === 'SETTINGS' && renderSettings()}
           {stage === 'GENDER' && renderGenderSelect()}
           {stage === 'WORLD' && renderWorldSelect()}

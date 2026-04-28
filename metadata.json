@@ -1,0 +1,5 @@
+{
+  "name": "Infinite Lives Simulator",
+  "description": "A text-based life simulation game where you choose a world, roll starting talents, and shape your destiny through dynamic events and choices.",
+  "requestFramePermissions": []
+}
